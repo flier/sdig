@@ -1,0 +1,272 @@
+package com.nexusguard.sdig
+
+import java.io.File
+import java.net.{Inet4Address, Inet6Address, InetAddress, InetSocketAddress}
+import java.time.format.DateTimeFormatter
+import java.time._
+import java.util.concurrent.CountDownLatch
+
+import ch.qos.logback.classic.Level
+import com.google.common.base.{CharMatcher, Joiner}
+import com.google.common.net.InetAddresses
+import com.typesafe.scalalogging.LazyLogging
+import io.netty.channel.AddressedEnvelope
+import io.netty.channel.nio.NioEventLoopGroup
+import io.netty.channel.socket.nio.NioDatagramChannel
+import io.netty.handler.codec.dns.DnsRecordType._
+import io.netty.handler.codec.dns._
+import io.netty.resolver.dns.{DnsNameResolverBuilder, DnsServerAddresses}
+import io.netty.util.concurrent.Future
+import org.slf4j.{Logger, LoggerFactory}
+
+import scala.io.Source
+import scala.collection.JavaConverters._
+
+case class Config(loggingLevel: Level = Level.WARN,
+                  inputFiles: Seq[File] = Seq(),
+                  queryDomains: Seq[String] = Seq(),
+                  dnsServers: Seq[String] = Seq(),
+                  workerThreads: Int = Runtime.getRuntime.availableProcessors(),
+                  decodeUnicode: Boolean = false,
+                  queryTimeout: Int = 5000,
+                  queryType: DnsRecordType = A,
+                  recurseQuery: Boolean = true)
+
+object Main extends LazyLogging {
+    val APP_NAME = "sdig"
+    val APP_VERSION = "1.0.0"
+    val DNS_PORT = 53
+
+    def parse_cmdline(args: Seq[String]): Option[Config] = {
+        val parser = new scopt.OptionParser[Config](APP_NAME) {
+            head(APP_NAME, APP_VERSION)
+
+            opt[Seq[File]]('i', "input")
+                .valueName("<file>[,<file>]")
+                .action((x, c) => c.copy(inputFiles = x))
+                .text("input files to lookup")
+                .optional()
+
+            opt[Seq[String]]('s', "server")
+                .valueName("<addr>[,<addr>]")
+                .action((x, c) => c.copy(dnsServers = x))
+                .text("DNS servers")
+
+            opt[Int]('c', "threads")
+                .valueName("<num>")
+                .action((x, c) => c.copy(workerThreads = x))
+                .text("worker threads")
+
+            opt[Boolean]("decode-unicode")
+                .action( (x, c) => c.copy(decodeUnicode = x) )
+                .text("names should be decoded to unicode when received.")
+
+            opt[Int]("query-timeout")
+                .valueName("<ms>")
+                .action((x, c) => c.copy(queryTimeout = x))
+                .text("the timeout of each DNS query performed by this resolver (in milliseconds).")
+
+            opt[String]('t', "query-type")
+                .valueName("<type>")
+                .action((x, c) => c.copy(queryType = valueOf(x.toUpperCase)))
+                .text("DNS record type.")
+
+            opt[Boolean]('r', "recursion")
+                .action((x, c) => c.copy(recurseQuery = x))
+                .text("send a DNS query with recursive mode.")
+
+            opt[Unit]('v', "verbose").action( (_, c) =>
+                c.copy(loggingLevel = Level.INFO))
+                .text("show verbose logs")
+
+            opt[Unit]('d', "debug").action( (_, c) =>
+                c.copy(loggingLevel = Level.DEBUG))
+                .text("show debug logs")
+
+            arg[String]("<domain>...")
+                .unbounded()
+                .optional()
+                .action((x, c) => c.copy(queryDomains = c.queryDomains :+ x))
+                .text("query domain")
+
+            help("help").text("prints this usage text")
+        }
+
+        parser.parse(args, Config())
+    }
+
+    def toString(clazz: Int): String = {
+        clazz & 0xFFFF match {
+            case DnsRecord.CLASS_IN => "IN"
+            case DnsRecord.CLASS_CSNET => "CSNET"
+            case DnsRecord.CLASS_CHAOS => "CHAOS"
+            case DnsRecord.CLASS_HESIOD => "HESIOD"
+            case DnsRecord.CLASS_NONE => "NONE"
+            case DnsRecord.CLASS_ANY => "ANY"
+            case _ => s"UNKNOWN($clazz)"
+        }
+    }
+
+    def main(args: Array[String]): Unit = {
+        parse_cmdline(args) match {
+            case Some(config) =>
+                LoggerFactory.getLogger(Logger.ROOT_LOGGER_NAME)
+                    .asInstanceOf[ch.qos.logback.classic.Logger]
+                    .setLevel(config.loggingLevel)
+
+                val resolver = new DnsNameResolverBuilder(new NioEventLoopGroup(config.workerThreads).next())
+                    .nameServerAddresses(if (config.dnsServers.isEmpty) {
+                        DnsServerAddresses.defaultAddresses()
+                    } else {
+                        DnsServerAddresses.shuffled(config.dnsServers.map(addr =>
+                            addr.split(':') match {
+                                case Array(host, port) => new InetSocketAddress(host, port.toInt)
+                                case Array(host) => new InetSocketAddress(host, DNS_PORT)
+                            }
+                        ).asJava)
+                    })
+                    .channelType(classOf[NioDatagramChannel])
+                    .decodeIdn(config.decodeUnicode)
+                    .queryTimeoutMillis(config.queryTimeout)
+                    .recursionDesired(config.recurseQuery)
+                    .optResourceEnabled(true)
+                    .traceEnabled(true)
+                    .build()
+
+                val domains = config.queryDomains ++
+                              config.inputFiles.flatMap(filename => Source.fromFile(filename).getLines())
+
+                val questions = domains
+                    .map(domain =>
+                        CharMatcher.whitespace().trimTrailingFrom(
+                            CharMatcher.whitespace().trimLeadingFrom(domain)))
+                    .map(domain =>
+                        if (config.queryType == PTR && !domain.endsWith(".arpa")) {
+                            val addr = InetAddresses.forString(domain)
+
+                            Joiner.on('.').join(addr.getAddress.reverse.map("%x".format(_)).toIterator.asJava) +
+                            (addr match {
+                                case _: Inet4Address => ".in-addr.arpa"
+                                case _: Inet6Address => ".ip6.arpa"
+                            })
+                        } else {
+                            domain
+                        })
+                    .map(new DefaultDnsQuestion(_, config.queryType))
+
+                val finished = new CountDownLatch(questions.size)
+
+                for (question <- questions) {
+                    val ts = Instant.now()
+
+                    val queryClass = toString(question.dnsClass)
+
+                    logger.debug(s"sending DNS query: ${question.name} ${question.`type`().name()} $queryClass")
+
+                    resolver.query(question).addListener((f: Future[AddressedEnvelope[DnsResponse, InetSocketAddress]]) => {
+                        try {
+                            if (f.isSuccess) {
+                                val answer = f.get()
+
+                                printResponse(answer.content(), answer.sender(), ts)
+                            } else {
+                                logger.warn(s"received error, ${f.cause()}")
+                            }
+                        } finally {
+                            finished.countDown()
+                        }
+                    })
+                }
+
+                finished.await()
+
+            case None => logger.error(s"fail to parse arguments, $args")
+        }
+    }
+
+    def printResponse(response: DnsResponse, server: InetSocketAddress, ts: Instant): Unit = {
+        logger.debug(s"received DNS answer from $server")
+
+        println(s";; ->>HEADER<<- opcode: ${response.opCode}, status: ${response.code}, id: ${response.id}")
+
+        val flags = List(
+            if (response.count(DnsSection.QUESTION) > 0) Some("qr") else None,
+            if (response.isAuthoritativeAnswer) Some("aa") else None,
+            if (response.isTruncated) Some("tc") else None,
+            if (response.isRecursionDesired) Some("rd") else None,
+            if (response.isRecursionAvailable) Some("ra") else None
+        ).flatten.mkString(" ")
+
+        val questions = response.count(DnsSection.QUESTION)
+        val answers = response.count(DnsSection.ANSWER)
+        val authorities = response.count(DnsSection.AUTHORITY)
+        val additionals = response.count(DnsSection.ADDITIONAL)
+
+        println(s";; flags: $flags; QUERY: $questions, ANSWSER: $answers, AUTHORITY: $authorities, ADDITIONAL: $additionals")
+
+        if (questions > 0) {
+            println("")
+            println(";; QUESTION SECTION:")
+
+            for (i <- 0 until questions) {
+                val record: DnsRecord = response.recordAt(DnsSection.QUESTION, i)
+
+                val name = record.name()
+                val dnsClass = toString(record.dnsClass)
+
+                println(s";; $name\t$dnsClass\t${record.`type`.name}")
+            }
+        }
+
+        if (answers > 0) {
+            println("")
+            println(";; ANSWER SECTION:")
+
+            for (i <- 0 until answers) {
+                val record: DnsRecord = response.recordAt(DnsSection.ANSWER, i)
+
+                val name = record.name()
+                val ttl = record.timeToLive()
+                val dnsClass = toString(record.dnsClass)
+                val tp = record.`type`().name()
+
+                record match {
+                    case raw: DnsRawRecord if Array(A, AAAA) contains record.`type`() =>
+                        val buf = new Array[Byte](raw.content().readableBytes)
+                        val idx = raw.content().readerIndex();
+                        raw.content().getBytes(idx, buf)
+                        val ip = InetAddress.getByAddress(buf).getHostAddress()
+
+                        println(s"$name\t\t$ttl\t$dnsClass\t$tp\t$ip")
+
+                    case ptr: DnsPtrRecord =>
+                        val hostname = ptr.hostname
+
+                        println(s"$hostname\t\t$ttl\t$dnsClass\t$tp\t$name")
+
+                    case _ =>
+                        println(s"$name\t\t$ttl\t$dnsClass\t$tp")
+                }
+            }
+        }
+
+        if (authorities > 0) {
+            println("")
+            println(";; AUTHORITY SECTION:")
+        }
+
+        if (additionals > 0) {
+            println("")
+            println(";; ADDITIONAL SECTION:")
+        }
+
+        val now = Instant.now()
+        val elapsed = Duration.between(ts, now).toMillis
+        val when = ZonedDateTime.ofInstant(now, ZoneId.systemDefault()).format(DateTimeFormatter.RFC_1123_DATE_TIME)
+
+        println("")
+        println(s";; Query time: $elapsed msec")
+        println(s";; SERVER: ${server.getAddress}#${server.getPort}")
+        println(s";; WHEN: $when")
+    }
+}
