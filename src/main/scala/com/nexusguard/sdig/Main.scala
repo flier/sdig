@@ -114,7 +114,8 @@ object Main extends LazyLogging {
                     .asInstanceOf[ch.qos.logback.classic.Logger]
                     .setLevel(config.loggingLevel)
 
-                val resolver = new DnsNameResolverBuilder(new NioEventLoopGroup(config.workerThreads).next())
+                val eventLoopGroup = new NioEventLoopGroup(config.workerThreads)
+                val resolver = new DnsNameResolverBuilder(eventLoopGroup.next())
                     .nameServerAddresses(if (config.dnsServers.isEmpty) {
                         DnsServerAddresses.defaultAddresses()
                     } else {
@@ -154,31 +155,37 @@ object Main extends LazyLogging {
                         })
                     .map(new DefaultDnsQuestion(_, config.queryType))
 
-                val finished = new CountDownLatch(questions.size)
+                try {
+                    val finished = new CountDownLatch(questions.size)
 
-                for (question <- questions) {
-                    val ts = Instant.now()
+                    questions.foreach(question => {
+                        val ts = Instant.now()
 
-                    val queryClass = toString(question.dnsClass)
+                        val queryClass = toString(question.dnsClass)
+                        val queryType = question.`type`().name()
 
-                    logger.debug(s"sending DNS query: ${question.name} ${question.`type`().name()} $queryClass")
+                        logger.debug(s"sending DNS query: ${question.name}\t$queryClass\t$queryType")
 
-                    resolver.query(question).addListener((f: Future[AddressedEnvelope[DnsResponse, InetSocketAddress]]) => {
-                        try {
-                            if (f.isSuccess) {
-                                val answer = f.get()
+                        resolver.query(question).addListener((f: Future[AddressedEnvelope[DnsResponse, InetSocketAddress]]) => {
+                            try {
+                                if (f.isSuccess) {
+                                    val answer = f.get()
 
-                                printResponse(answer.content(), answer.sender(), ts)
-                            } else {
-                                logger.warn(s"received error, ${f.cause()}")
+                                    printResponse(answer.content(), answer.sender(), ts)
+                                } else {
+                                    logger.warn(s"received error, ${f.cause()}")
+                                }
+                            } finally {
+                                finished.countDown()
                             }
-                        } finally {
-                            finished.countDown()
-                        }
+                        })
                     })
+
+                    finished.await()
+                } finally {
+                    eventLoopGroup.shutdownGracefully()
                 }
 
-                finished.await()
 
             case None => logger.error(s"fail to parse arguments, $args")
         }
@@ -197,20 +204,22 @@ object Main extends LazyLogging {
             if (response.isRecursionAvailable) Some("ra") else None
         ).flatten.mkString(" ")
 
-        val questions = response.count(DnsSection.QUESTION)
-        val answers = response.count(DnsSection.ANSWER)
-        val authorities = response.count(DnsSection.AUTHORITY)
-        val additionals = response.count(DnsSection.ADDITIONAL)
+        def getRecords(section: DnsSection): Seq[DnsRecord] =
+            (0 until response.count(section)).map(response.recordAt(section, _).asInstanceOf[DnsRecord])
 
-        println(s";; flags: $flags; QUERY: $questions, ANSWSER: $answers, AUTHORITY: $authorities, ADDITIONAL: $additionals")
+        val questions = getRecords(DnsSection.QUESTION)
+        val answers = getRecords(DnsSection.ANSWER)
+        val authorities = getRecords(DnsSection.AUTHORITY)
+        val additionals = getRecords(DnsSection.ADDITIONAL)
 
-        if (questions > 0) {
+        println(s";; flags: $flags; QUERY: ${questions.size}, ANSWSER: ${answers.size}, " +
+                s"AUTHORITY: ${authorities.size}, ADDITIONAL: ${additionals.size}")
+
+        if (questions.nonEmpty) {
             println("")
             println(";; QUESTION SECTION:")
 
-            for (i <- 0 until questions) {
-                val record: DnsRecord = response.recordAt(DnsSection.QUESTION, i)
-
+            for (record <- questions) {
                 val name = record.name()
                 val dnsClass = toString(record.dnsClass)
 
@@ -218,13 +227,11 @@ object Main extends LazyLogging {
             }
         }
 
-        if (answers > 0) {
+        if (answers.nonEmpty) {
             println("")
             println(";; ANSWER SECTION:")
 
-            for (i <- 0 until answers) {
-                val record: DnsRecord = response.recordAt(DnsSection.ANSWER, i)
-
+            for (record <- answers) {
                 val name = record.name()
                 val ttl = record.timeToLive()
                 val dnsClass = toString(record.dnsClass)
@@ -233,9 +240,9 @@ object Main extends LazyLogging {
                 record match {
                     case raw: DnsRawRecord if Array(A, AAAA) contains record.`type`() =>
                         val buf = new Array[Byte](raw.content().readableBytes)
-                        val idx = raw.content().readerIndex();
+                        val idx = raw.content().readerIndex()
                         raw.content().getBytes(idx, buf)
-                        val ip = InetAddress.getByAddress(buf).getHostAddress()
+                        val ip = InetAddress.getByAddress(buf).getHostAddress
 
                         println(s"$name\t\t$ttl\t$dnsClass\t$tp\t$ip")
 
@@ -250,12 +257,12 @@ object Main extends LazyLogging {
             }
         }
 
-        if (authorities > 0) {
+        if (authorities.nonEmpty) {
             println("")
             println(";; AUTHORITY SECTION:")
         }
 
-        if (additionals > 0) {
+        if (additionals.nonEmpty) {
             println("")
             println(";; ADDITIONAL SECTION:")
         }
