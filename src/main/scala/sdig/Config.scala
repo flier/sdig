@@ -6,10 +6,12 @@ import java.time.Duration
 
 import ch.qos.logback.classic.Level
 import com.typesafe.scalalogging.LazyLogging
+import io.netty.channel.ChannelOutboundHandler
 import io.netty.channel.nio.NioEventLoopGroup
 import io.netty.channel.socket.nio.NioDatagramChannel
 import io.netty.handler.codec.dns.DnsRecordType
 import io.netty.handler.codec.dns.DnsRecordType.{A, valueOf}
+import io.netty.handler.traffic.{AbstractTrafficShapingHandler, GlobalTrafficShapingHandler}
 import io.netty.resolver.dns.{DnsNameResolver, DnsNameResolverBuilder, DnsServerAddresses}
 import org.apache.commons.pool2.impl.{DefaultPooledObject, GenericObjectPool, GenericObjectPoolConfig}
 import org.apache.commons.pool2.{BasePooledObjectFactory, PooledObject}
@@ -25,6 +27,10 @@ case class Config(loggingLevel: Level = Level.WARN,
                   maxTotalPooledResolver: Int = GenericObjectPoolConfig.DEFAULT_MAX_TOTAL,
                   maxIdlePooledResolver: Int = GenericObjectPoolConfig.DEFAULT_MAX_IDLE,
                   minIdlePooledResolver: Int = GenericObjectPoolConfig.DEFAULT_MIN_IDLE,
+                  writeLimit: Long = 0,
+                  readLimit: Long = 0,
+                  checkInterval: Long = AbstractTrafficShapingHandler.DEFAULT_CHECK_INTERVAL,
+                  maxWaitTime: Long = AbstractTrafficShapingHandler.DEFAULT_MAX_TIME,
                   decodeUnicode: Boolean = false,
                   queryTimeout: Long = Duration.ofSeconds(5).toMillis,
                   queryType: DnsRecordType = A,
@@ -44,6 +50,13 @@ case class Config(loggingLevel: Level = Level.WARN,
         ).asJava)
     }
 
+    lazy val trafficShaping: Option[ChannelOutboundHandler] = if (writeLimit > 0) {
+        logger.info(s"using traffic shaping within write $writeLimit bytes/s, read $readLimit bytes/s")
+        Some(new GlobalTrafficShapingHandler(eventLoopGroup.next(), writeLimit, readLimit, checkInterval, maxWaitTime))
+    } else {
+        None
+    }
+
     lazy val dnsNameResolverPool: GenericObjectPool[DnsNameResolver] = {
         val poolConfig = new GenericObjectPoolConfig() {{
             setMaxTotal(maxTotalPooledResolver)
@@ -61,7 +74,17 @@ case class Config(loggingLevel: Level = Level.WARN,
                 override def create(): DnsNameResolver = {
                     new DnsNameResolverBuilder(eventLoopGroup.next())
                         .nameServerAddresses(dnsServerAddrs)
-                        .channelType(classOf[NioDatagramChannel])
+                        .channelFactory(() => {
+                            val ch = new NioDatagramChannel()
+
+                            trafficShaping match {
+                                case Some(handler) =>
+                                    ch.pipeline().addLast("traffic-shaping", handler)
+                                case _ =>
+                            }
+
+                            ch
+                        })
                         .decodeIdn(decodeUnicode)
                         .queryTimeoutMillis(queryTimeout)
                         .recursionDesired(recurseQuery)
@@ -121,6 +144,11 @@ object Config extends LazyLogging {
                 .valueName("<num>")
                 .action((x, c) => c.copy(minIdlePooledResolver = x))
                 .text("the minimum number of DNS resolver that can be idled in the pool")
+
+            opt[Long]("write-limit")
+                .valueName("<bytes>")
+                .action((x, c) => c.copy(writeLimit = x))
+                .text("set 0 or a limit in bytes/s")
 
             opt[Boolean]("decode-unicode")
                 .action( (x, c) => c.copy(decodeUnicode = x) )
