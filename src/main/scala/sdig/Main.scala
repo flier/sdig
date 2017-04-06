@@ -169,6 +169,11 @@ object Main extends LazyLogging {
 
                         f"$name%-32s\t$ttl\t$dnsClass\t$tp\t${ns.hostname}"
 
+                    case raw: DnsRawRecord if record.`type`() == SRV =>
+                        val srv: DnsSrvRecord = raw
+
+                        f"$name%-32s\t$ttl\t$dnsClass\t$tp\t${srv.priority} ${srv.weight} ${srv.port} ${srv.target}"
+
                     case raw: DnsRawRecord if record.`type`() == TXT =>
                         val txt: DnsTxtRecord = raw
 

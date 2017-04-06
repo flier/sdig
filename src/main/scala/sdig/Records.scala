@@ -51,6 +51,30 @@ trait DnsNsRecord extends DnsRecord {
     val hostname: String
 }
 
+trait DnsSrvRecord extends DnsRecord {
+    /*
+     * The priority of this target host.
+     */
+    val priority: Int
+
+    /*
+     * A server selection mechanism.
+     *
+     * The weight field specifies a relative weight for entries with the same priority.
+     */
+    val weight: Int
+
+    /*
+     * The port on this target host of this service.
+     */
+    val port: Int
+
+    /*
+     * The domain name of the target host.
+     */
+    val target: String
+}
+
 trait DnsSoaRecord extends DnsRecord {
     /*
      * the name server that was the original or primary source of data for this zone.
@@ -195,6 +219,32 @@ object DefaultDnsNsRecord {
     }
 }
 
+case class DefaultDnsSrvRecord(name: String,
+                               dnsClass: Int,
+                               timeToLive: Long,
+                               priority: Int,
+                               weight: Int,
+                               port: Int,
+                               target: String) extends DnsSrvRecord {
+    override def `type`(): DnsRecordType = DnsRecordType.SRV
+}
+
+object DefaultDnsSrvRecord {
+    def parse(raw: DnsRawRecord): DnsSrvRecord = {
+        checkNotNull(raw, "raw")
+        checkArgument(raw.`type`() == DnsRecordType.SRV)
+
+        val buf = raw.content()
+
+        val priority = buf.readUnsignedShort()
+        val weight = buf.readUnsignedShort()
+        val port = buf.readUnsignedShort()
+        val target = DefaultDnsRecordDecoder.decodeName(buf)
+
+        DefaultDnsSrvRecord(raw.name(), raw.dnsClass(), raw.timeToLive(), priority, weight, port, target)
+    }
+}
+
 case class DefaultDnsSoaRecord(name: String,
                                dnsClass: Int,
                                timeToLive: Long,
@@ -257,6 +307,8 @@ object implicitConversions {
     implicit def parseDnsMxRecord(raw: DnsRawRecord): DnsMxRecord = DefaultDnsMxRecord.parse(raw)
 
     implicit def parseDnsNsRecord(raw: DnsRawRecord): DnsNsRecord = DefaultDnsNsRecord.parse(raw)
+
+    implicit def parseDnsSrvRecord(raw: DnsRawRecord): DnsSrvRecord = DefaultDnsSrvRecord.parse(raw)
 
     implicit def parseDnsSoaRecord(raw: DnsRawRecord): DnsSoaRecord = DefaultDnsSoaRecord.parse(raw)
 
