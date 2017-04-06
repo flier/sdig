@@ -17,7 +17,7 @@ import io.netty.handler.codec.dns.DnsRecordType._
 import io.netty.handler.codec.dns._
 import io.netty.resolver.dns.{DnsNameResolver, DnsNameResolverBuilder, DnsServerAddresses}
 import io.netty.util.concurrent.Future
-import org.apache.commons.pool2.impl.{DefaultPooledObject, GenericObjectPool}
+import org.apache.commons.pool2.impl.{DefaultPooledObject, GenericObjectPool, GenericObjectPoolConfig}
 import org.apache.commons.pool2.{BasePooledObjectFactory, PooledObject}
 import org.slf4j.{Logger, LoggerFactory}
 
@@ -30,18 +30,17 @@ case class Config(loggingLevel: Level = Level.WARN,
                   queryDomains: Seq[String] = Seq(),
                   dnsServers: Seq[String] = Seq(),
                   workerThreads: Int = Runtime.getRuntime.availableProcessors(),
+                  maxTotalPooledResolver: Int = GenericObjectPoolConfig.DEFAULT_MAX_TOTAL,
+                  maxIdlePooledResolver: Int = GenericObjectPoolConfig.DEFAULT_MAX_IDLE,
+                  minIdlePooledResolver: Int = GenericObjectPoolConfig.DEFAULT_MIN_IDLE,
                   decodeUnicode: Boolean = false,
                   queryTimeout: Long = Duration.ofSeconds(5).toMillis,
                   queryType: DnsRecordType = A,
-                  recurseQuery: Boolean = true)
+                  recurseQuery: Boolean = true) extends LazyLogging
 {
-    LoggerFactory.getLogger(Logger.ROOT_LOGGER_NAME)
-        .asInstanceOf[ch.qos.logback.classic.Logger]
-        .setLevel(loggingLevel)
+    lazy val eventLoopGroup: NioEventLoopGroup = new NioEventLoopGroup(workerThreads)
 
-    val eventLoopGroup: NioEventLoopGroup = new NioEventLoopGroup(workerThreads)
-
-    val dnsServerAddrs: DnsServerAddresses = if (dnsServers.isEmpty) {
+    lazy val dnsServerAddrs: DnsServerAddresses = if (dnsServers.isEmpty) {
         DnsServerAddresses.defaultAddresses()
     } else {
         DnsServerAddresses.shuffled(dnsServers.map(addr =>
@@ -52,7 +51,7 @@ case class Config(loggingLevel: Level = Level.WARN,
         ).asJava)
     }
 
-    val dnsNameResolverPool: GenericObjectPool[DnsNameResolver] =
+    lazy val dnsNameResolverPool: GenericObjectPool[DnsNameResolver] =
         new GenericObjectPool[DnsNameResolver](
             new BasePooledObjectFactory[DnsNameResolver]() {
                 override def create(): DnsNameResolver = {
@@ -70,12 +69,21 @@ case class Config(loggingLevel: Level = Level.WARN,
                 override def wrap(resolver: DnsNameResolver): PooledObject[DnsNameResolver] = {
                     new DefaultPooledObject[DnsNameResolver](resolver)
                 }
-            })
+            }, new GenericObjectPoolConfig() {{
+                logger.debug(s"creating DNS resolver pool, " +
+                             s"max_total=$maxTotalPooledResolver, " +
+                             s"max_idle=$maxIdlePooledResolver, " +
+                             s"min_idle=$minIdlePooledResolver")
 
-    val domains: Seq[String] = queryDomains ++ inputFiles.flatMap(Source.fromFile(_).getLines())
+                setMaxTotal(maxTotalPooledResolver)
+                setMaxIdle(maxIdlePooledResolver)
+                setMinIdle(minIdlePooledResolver)
+            }})
+
+    lazy val domains: Seq[String] = queryDomains ++ inputFiles.flatMap(Source.fromFile(_).getLines())
 }
 
-object Config {
+object Config extends LazyLogging {
     val APP_NAME = "sdig"
     val APP_VERSION = "1.0.0"
 
@@ -100,6 +108,21 @@ object Config {
                 .valueName("<num>")
                 .action((x, c) => c.copy(workerThreads = x))
                 .text("worker threads")
+
+            opt[Int]("max-total")
+                .valueName("<num>")
+                .action((x, c) => c.copy(maxTotalPooledResolver = x))
+                .text("the maximum number of DNS resolver that can be cached in the pool")
+
+            opt[Int]("max-idle")
+                .valueName("<num>")
+                .action((x, c) => c.copy(maxIdlePooledResolver = x))
+                .text("the maximum number of DNS resolver that can be idled in the pool")
+
+            opt[Int]("min-total")
+                .valueName("<num>")
+                .action((x, c) => c.copy(minIdlePooledResolver = x))
+                .text("the minimum number of DNS resolver that can be idled in the pool")
 
             opt[Boolean]("decode-unicode")
                 .action( (x, c) => c.copy(decodeUnicode = x) )
@@ -156,6 +179,10 @@ object Main extends LazyLogging {
     def main(args: Array[String]): Unit = {
         Config.parse(args) match {
             case Some(config) =>
+                LoggerFactory.getLogger(Logger.ROOT_LOGGER_NAME)
+                    .asInstanceOf[ch.qos.logback.classic.Logger]
+                    .setLevel(config.loggingLevel)
+
                 val questions = config.domains
                     .map(domain =>
                         CharMatcher.whitespace().trimTrailingFrom(
