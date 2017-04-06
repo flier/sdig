@@ -1,8 +1,8 @@
-package com.nexusguard.sdig
+package sdig
 
 import java.net.{Inet4Address, Inet6Address, InetAddress, InetSocketAddress}
-import java.time.format.DateTimeFormatter
 import java.time._
+import java.time.format.DateTimeFormatter
 import java.util.concurrent.CountDownLatch
 
 import com.google.common.base.{CharMatcher, Joiner}

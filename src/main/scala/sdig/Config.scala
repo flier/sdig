@@ -1,4 +1,4 @@
-package com.nexusguard.sdig
+package sdig
 
 import java.io.File
 import java.net.InetSocketAddress
@@ -11,11 +11,11 @@ import io.netty.channel.socket.nio.NioDatagramChannel
 import io.netty.handler.codec.dns.DnsRecordType
 import io.netty.handler.codec.dns.DnsRecordType.{A, valueOf}
 import io.netty.resolver.dns.{DnsNameResolver, DnsNameResolverBuilder, DnsServerAddresses}
-import org.apache.commons.pool2.{BasePooledObjectFactory, PooledObject}
 import org.apache.commons.pool2.impl.{DefaultPooledObject, GenericObjectPool, GenericObjectPoolConfig}
+import org.apache.commons.pool2.{BasePooledObjectFactory, PooledObject}
 
-import scala.io.Source
 import scala.collection.JavaConverters._
+import scala.io.Source
 
 case class Config(loggingLevel: Level = Level.WARN,
                   inputFiles: Seq[File] = Seq(),

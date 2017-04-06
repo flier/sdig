@@ -8,7 +8,7 @@ lazy val commonSettings = Seq(
 lazy val root = (project in file("."))
     .settings(commonSettings: _*)
     .settings(
-        mainClass := Some("com.nexusguard.sdig.Main")
+        mainClass := Some("sdig.Main")
     )
 
 resolvers += Resolver.mavenLocal
@@ -20,6 +20,7 @@ libraryDependencies ++= Seq(
     "com.github.scopt" %% "scopt" % "3.5.0",
     "com.google.guava" % "guava" % "21.0",
     "org.apache.commons" % "commons-pool2" % "2.4.2",
+    "nl.grons" %% "metrics-scala" % "3.5.6_a2.4",
 
     "io.netty" % "netty-all" % "4.1.9.Final"
 )
