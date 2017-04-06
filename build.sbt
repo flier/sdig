@@ -1,11 +1,15 @@
-lazy val root = (project in file("."))
-    .settings(
-        name := "sdig",
-        version := "1.0",
-        scalaVersion := "2.12.1"
-    )
+lazy val commonSettings = Seq(
+    name := "sdig",
+    version := "1.0",
+    scalaVersion := "2.12.1",
+    test in assembly := {}
+)
 
-mainClass in (Compile, run) := Some("com.nexusguard.sdig.Main")
+lazy val root = (project in file("."))
+    .settings(commonSettings: _*)
+    .settings(
+        mainClass := Some("com.nexusguard.sdig.Main")
+    )
 
 resolvers += Resolver.mavenLocal
 
