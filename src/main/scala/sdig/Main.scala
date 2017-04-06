@@ -58,7 +58,7 @@ object Main extends DefaultInstrumented with LazyLogging {
                     .map(new DefaultDnsQuestion(_, config.queryType))
 
                 try {
-                    val finished = new CountDownLatch(questions.size)
+                    val finished = new CountDownLatch(questions.size * config.benchmarkIterations)
 
                     logger.info(s"sending ${finished.getCount} questions")
 
@@ -66,6 +66,8 @@ object Main extends DefaultInstrumented with LazyLogging {
                     val sentQueries = metrics.meter("sent-queries", "resolve")
                     val receivedAnswers = metrics.meter("received-answers", "resolve")
                     val receivedErrors = metrics.meter("received-errors", "resolve")
+
+                    val startTime = Instant.now()
 
                     questions.foreach(question => {
                         val ts = Instant.now()
@@ -75,38 +77,46 @@ object Main extends DefaultInstrumented with LazyLogging {
 
                         logger.debug(s"sending DNS query: ${question.name}\t$queryClass\t$queryType")
 
-                        val resolver = config.dnsNameResolverPool.borrowObject()
+                        for (_ <- 0 until config.benchmarkIterations) {
+                            val resolver = config.dnsNameResolverPool.borrowObject()
 
-                        val ctxt = responseTime.timerContext()
+                            val ctxt = responseTime.timerContext()
 
-                        resolver.query(question).addListener((future: Future[AddressedEnvelope[DnsResponse, InetSocketAddress]]) => {
-                            ctxt.stop()
+                            resolver.query(question).addListener((future: Future[AddressedEnvelope[DnsResponse, InetSocketAddress]]) => {
+                                ctxt.stop()
 
-                            try {
-                                if (future.isSuccess) {
-                                    receivedAnswers.mark()
+                                try {
+                                    if (future.isSuccess) {
+                                        receivedAnswers.mark()
 
-                                    val answer = future.get()
+                                        val answer = future.get()
 
-                                    println(dumpResponse(answer.content(), answer.sender(), ts))
-                                } else {
-                                    receivedErrors.mark()
+                                        if (!config.benchMode) {
+                                            println(dumpResponse(answer.content(), answer.sender(), ts))
+                                        }
 
-                                    logger.warn(s"received error, ${future.cause()}")
+                                        answer.release()
+                                    } else {
+                                        receivedErrors.mark()
+
+                                        logger.warn(s"received error, ${future.cause()}")
+                                    }
+                                } finally {
+                                    config.dnsNameResolverPool.returnObject(resolver)
+
+                                    finished.countDown()
                                 }
-                            } finally {
-                                config.dnsNameResolverPool.returnObject(resolver)
+                            })
 
-                                finished.countDown()
-                            }
-                        })
-
-                        sentQueries.mark()
+                            sentQueries.mark()
+                        }
                     })
 
                     finished.await()
 
-                    logger.info(s"sent ${sentQueries.count} queries with ${responseTime.count} responses, " +
+                    val elapsed = Duration.between(startTime, Instant.now()).toMillis
+
+                    logger.info(s"sent ${sentQueries.count} queries in $elapsed ms with ${responseTime.count} responses, " +
                         f"${receivedAnswers.count} answers (${receivedAnswers.count * 100.0 / sentQueries.count}%.2f%%), " +
                         f"${receivedErrors.count} errors (${receivedErrors.count * 100.0 / sentQueries.count}%.2f%%)")
                     logger.info(f"sent in ${sentQueries.meanRate}%.2f/s (" +

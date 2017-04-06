@@ -28,7 +28,8 @@ case class Config(loggingLevel: Level = Level.WARN,
                   decodeUnicode: Boolean = false,
                   queryTimeout: Long = Duration.ofSeconds(5).toMillis,
                   queryType: DnsRecordType = A,
-                  recurseQuery: Boolean = true) extends LazyLogging
+                  recurseQuery: Boolean = true,
+                  benchmarkIterations: Int = 1) extends LazyLogging
 {
     lazy val eventLoopGroup: NioEventLoopGroup = new NioEventLoopGroup(workerThreads)
 
@@ -43,7 +44,18 @@ case class Config(loggingLevel: Level = Level.WARN,
         ).asJava)
     }
 
-    lazy val dnsNameResolverPool: GenericObjectPool[DnsNameResolver] =
+    lazy val dnsNameResolverPool: GenericObjectPool[DnsNameResolver] = {
+        val poolConfig = new GenericObjectPoolConfig() {{
+            setMaxTotal(maxTotalPooledResolver)
+            setMaxIdle(maxIdlePooledResolver)
+            setMinIdle(minIdlePooledResolver)
+        }}
+
+        logger.info(s"using DNS resolver pool, " +
+            s"max_total=${poolConfig.getMaxTotal}, " +
+            s"max_idle=${poolConfig.getMaxIdle}, " +
+            s"min_idle=${poolConfig.getMinIdle}")
+
         new GenericObjectPool[DnsNameResolver](
             new BasePooledObjectFactory[DnsNameResolver]() {
                 override def create(): DnsNameResolver = {
@@ -61,18 +73,12 @@ case class Config(loggingLevel: Level = Level.WARN,
                 override def wrap(resolver: DnsNameResolver): PooledObject[DnsNameResolver] = {
                     new DefaultPooledObject[DnsNameResolver](resolver)
                 }
-            }, new GenericObjectPoolConfig() {{
-                logger.debug(s"creating DNS resolver pool, " +
-                    s"max_total=$maxTotalPooledResolver, " +
-                    s"max_idle=$maxIdlePooledResolver, " +
-                    s"min_idle=$minIdlePooledResolver")
-
-                setMaxTotal(maxTotalPooledResolver)
-                setMaxIdle(maxIdlePooledResolver)
-                setMinIdle(minIdlePooledResolver)
-            }})
+            }, poolConfig)
+    }
 
     lazy val domains: Seq[String] = queryDomains ++ inputFiles.flatMap(Source.fromFile(_).getLines())
+
+    lazy val benchMode: Boolean = benchmarkIterations > 1
 }
 
 object Config extends LazyLogging {
@@ -141,6 +147,11 @@ object Config extends LazyLogging {
             opt[Unit]('d', "debug").action( (_, c) =>
                 c.copy(loggingLevel = Level.DEBUG))
                 .text("show debug logs")
+
+            opt[Int]('b', "bench")
+                .valueName("<num>")
+                .action((x, c) => c.copy(benchmarkIterations = x))
+                .text("the number of iterations for which the benchmark is run.")
 
             arg[String]("<domain>...")
                 .unbounded()
