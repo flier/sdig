@@ -120,9 +120,7 @@ trait DnsTxtRecord extends DnsRecord {
     val data: String
 }
 
-trait DnsRecordParser {
-    type T <: DnsRecord
-
+trait DnsRecordParser[T <: DnsRecord] {
     def parse(raw: DnsRawRecord): T
 }
 
@@ -133,7 +131,7 @@ case class DefaultDnsARecord(name: String,
     override def `type`(): DnsRecordType = DnsRecordType.A
 }
 
-object DefaultDnsARecord extends DnsRecordParser {
+object DefaultDnsARecord extends DnsRecordParser[DnsARecord] {
     override def parse(raw: DnsRawRecord): DnsARecord = {
         checkNotNull(raw, "raw")
         checkArgument(raw.`type`() == DnsRecordType.A)
@@ -154,7 +152,7 @@ case class DefaultDnsAAAARecord(name: String,
     override def `type`(): DnsRecordType = DnsRecordType.AAAA
 }
 
-object DefaultDnsAAAARecord extends DnsRecordParser {
+object DefaultDnsAAAARecord extends DnsRecordParser[DnsAAAARecord] {
     override def parse(raw: DnsRawRecord): DnsAAAARecord = {
         checkNotNull(raw, "raw")
         checkArgument(raw.`type`() == DnsRecordType.AAAA)
@@ -175,7 +173,7 @@ case class DefaultDnsCNameRecord(name: String,
     override def `type`(): DnsRecordType = DnsRecordType.CNAME
 }
 
-object DefaultDnsCNameRecord extends DnsRecordParser {
+object DefaultDnsCNameRecord extends DnsRecordParser[DnsCNameRecord] {
     override def parse(raw: DnsRawRecord): DnsCNameRecord = {
         checkNotNull(raw, "raw")
         checkArgument(raw.`type`() == DnsRecordType.CNAME)
@@ -194,7 +192,7 @@ case class DefaultDnsMxRecord(name: String,
     override def `type`(): DnsRecordType = DnsRecordType.MX
 }
 
-object DefaultDnsMxRecord extends DnsRecordParser {
+object DefaultDnsMxRecord extends DnsRecordParser[DnsMxRecord] {
     override def parse(raw: DnsRawRecord): DnsMxRecord = {
         checkNotNull(raw, "raw")
         checkArgument(raw.`type`() == DnsRecordType.MX)
@@ -214,7 +212,7 @@ case class DefaultDnsNsRecord(name: String,
     override def `type`(): DnsRecordType = DnsRecordType.NS
 }
 
-object DefaultDnsNsRecord extends DnsRecordParser {
+object DefaultDnsNsRecord extends DnsRecordParser[DnsNsRecord] {
     override def parse(raw: DnsRawRecord): DnsNsRecord = {
         checkNotNull(raw, "raw")
         checkArgument(raw.`type`() == DnsRecordType.NS)
@@ -235,7 +233,7 @@ case class DefaultDnsSrvRecord(name: String,
     override def `type`(): DnsRecordType = DnsRecordType.SRV
 }
 
-object DefaultDnsSrvRecord extends DnsRecordParser {
+object DefaultDnsSrvRecord extends DnsRecordParser[DnsSrvRecord] {
     override def parse(raw: DnsRawRecord): DnsSrvRecord = {
         checkNotNull(raw, "raw")
         checkArgument(raw.`type`() == DnsRecordType.SRV)
@@ -264,7 +262,7 @@ case class DefaultDnsSoaRecord(name: String,
     override def `type`(): DnsRecordType = DnsRecordType.SOA
 }
 
-object DefaultDnsSoaRecord extends DnsRecordParser {
+object DefaultDnsSoaRecord extends DnsRecordParser[DnsSoaRecord] {
     override def parse(raw: DnsRawRecord): DnsSoaRecord = {
         checkNotNull(raw, "raw")
         checkArgument(raw.`type`() == DnsRecordType.SOA)
@@ -292,7 +290,7 @@ case class DefaultDnsTxtRecord(name: String,
     override def `type`(): DnsRecordType = DnsRecordType.TXT
 }
 
-object DefaultDnsTxtRecord extends DnsRecordParser {
+object DefaultDnsTxtRecord extends DnsRecordParser[DnsTxtRecord] {
     override def parse(raw: DnsRawRecord): DnsTxtRecord = {
         checkNotNull(raw, "raw")
         checkArgument(raw.`type`() == DnsRecordType.TXT)
