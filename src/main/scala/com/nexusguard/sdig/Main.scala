@@ -264,10 +264,10 @@ object Main extends LazyLogging {
         val questions = getRecords(DnsSection.QUESTION)
         val answers = getRecords(DnsSection.ANSWER)
         val authorities = getRecords(DnsSection.AUTHORITY)
-        val additionals = getRecords(DnsSection.ADDITIONAL)
+        val additions = getRecords(DnsSection.ADDITIONAL)
 
         lines += s";; flags: $flags; QUERY: ${questions.size}, ANSWSER: ${answers.size}, " +
-                 s"AUTHORITY: ${authorities.size}, ADDITIONAL: ${additionals.size}"
+                 s"AUTHORITY: ${authorities.size}, ADDITIONAL: ${additions.size}"
 
         if (questions.nonEmpty) {
             lines ++= Seq("", ";; QUESTION SECTION:")
@@ -321,9 +321,35 @@ object Main extends LazyLogging {
 
         if (authorities.nonEmpty) {
             lines ++= Seq("", ";; AUTHORITY SECTION:")
+            lines ++= authorities.map(record => {
+                val name = record.name()
+                val ttl = record.timeToLive()
+                val dnsClass = dnsClassName(record.dnsClass)
+                val tp = record.`type`().name()
+
+                record match {
+                    case raw: DnsRawRecord if record.`type`() == SOA =>
+                        val buf = raw.content()
+
+                        val primaryNameServer = DefaultDnsRecordDecoder.decodeName(buf)
+                        val responsibleAuthorityMailbox = DefaultDnsRecordDecoder.decodeName(buf)
+                        val serialNumber = buf.readUnsignedInt()
+                        val refreshInterval = buf.readUnsignedInt()
+                        val retryInterval = buf.readUnsignedInt()
+                        val expireLimit = buf.readUnsignedInt()
+                        val minimumTTL = buf.readUnsignedInt()
+
+                        f"$name%-32s\t$ttl\t$dnsClass\t$tp\t" +
+                        f"$primaryNameServer $responsibleAuthorityMailbox $serialNumber " +
+                        f"$refreshInterval $retryInterval $expireLimit $minimumTTL"
+
+                    case _ =>
+                        f"$name%-32s\t$ttl\t$dnsClass\t$tp"
+                }
+            })
         }
 
-        if (additionals.nonEmpty) {
+        if (additions.nonEmpty) {
             lines ++= Seq("", ";; ADDITIONAL SECTION:")
         }
 
