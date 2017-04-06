@@ -17,6 +17,8 @@ import org.slf4j.{Logger, LoggerFactory}
 import scala.collection.JavaConverters._
 import scala.collection.mutable.ListBuffer
 
+import sdig.implicitConversions._
+
 object Main extends LazyLogging {
     def dnsClassName(clazz: Int): String = {
         clazz & 0xFFFF match {
@@ -142,30 +144,33 @@ object Main extends LazyLogging {
                 val tp = record.`type`().name()
 
                 record match {
-                    case raw: DnsRawRecord if Array(A, AAAA) contains record.`type`() =>
-                        val buf = new Array[Byte](raw.content().readableBytes)
-                        val idx = raw.content().readerIndex()
-                        raw.content().getBytes(idx, buf)
-                        val ip = InetAddress.getByAddress(buf).getHostAddress
+                    case raw: DnsRawRecord if record.`type`() == A =>
+                        val a: DnsARecord = raw
 
-                        f"$name%-32s\t$ttl\t$dnsClass\t$tp\t$ip"
+                        f"$name%-32s\t$ttl\t$dnsClass\t$tp\t${a.address.getHostAddress}"
+
+                    case raw: DnsRawRecord if record.`type`() == AAAA =>
+                        val a: DnsAAAARecord = raw
+
+                        f"$name%-32s\t$ttl\t$dnsClass\t$tp\t${a.address.getHostAddress}"
 
                     case raw: DnsRawRecord if record.`type`() == CNAME =>
-                        val cname = DefaultDnsRecordDecoder.decodeName(raw.content())
+                        val cname: DnsCNameRecord = raw
 
-                        f"$name%-32s\t$ttl\t$dnsClass\t$tp\t$cname"
+                        f"$name%-32s\t$ttl\t$dnsClass\t$tp\t${cname.hostname}"
 
                     case raw: DnsRawRecord if record.`type`() == MX =>
-                        val buf = raw.content()
-                        val preference = buf.readShort()
-                        val mx = DefaultDnsRecordDecoder.decodeName(buf)
+                        val mx: DnsMxRecord = raw
 
-                        f"$name%-32s\t$ttl\t$dnsClass\t$tp\t$preference\t$mx"
+                        f"$name%-32s\t$ttl\t$dnsClass\t$tp\t${mx.preference}\t${mx.hostname}"
+
+                    case raw: DnsRawRecord if record.`type`() == NS =>
+                        val ns: DnsNsRecord = raw
+
+                        f"$name%-32s\t$ttl\t$dnsClass\t$tp\t${ns.hostname}"
 
                     case ptr: DnsPtrRecord =>
-                        val hostname = ptr.hostname
-
-                        f"$name%-32s\t$ttl\t$dnsClass\t$tp\t$hostname"
+                        f"$name%-32s\t$ttl\t$dnsClass\t$tp\t${ptr.hostname}"
 
                     case _ =>
                         f"$name%-32s\t$ttl\t$dnsClass\t$tp"
@@ -183,19 +188,11 @@ object Main extends LazyLogging {
 
                 record match {
                     case raw: DnsRawRecord if record.`type`() == SOA =>
-                        val buf = raw.content()
-
-                        val primaryNameServer = DefaultDnsRecordDecoder.decodeName(buf)
-                        val responsibleAuthorityMailbox = DefaultDnsRecordDecoder.decodeName(buf)
-                        val serialNumber = buf.readUnsignedInt()
-                        val refreshInterval = buf.readUnsignedInt()
-                        val retryInterval = buf.readUnsignedInt()
-                        val expireLimit = buf.readUnsignedInt()
-                        val minimumTTL = buf.readUnsignedInt()
+                        val soa: DnsSoaRecord = raw
 
                         f"$name%-32s\t$ttl\t$dnsClass\t$tp\t" +
-                        f"$primaryNameServer $responsibleAuthorityMailbox $serialNumber " +
-                        f"$refreshInterval $retryInterval $expireLimit $minimumTTL"
+                        f"${soa.primaryNameServer} ${soa.responsibleAuthorityMailbox} ${soa.serialNumber} " +
+                        f"${soa.refreshInterval} ${soa.retryInterval} ${soa.expireLimit} ${soa.minimumTTL}"
 
                     case _ =>
                         f"$name%-32s\t$ttl\t$dnsClass\t$tp"
