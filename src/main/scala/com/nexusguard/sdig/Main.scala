@@ -118,27 +118,28 @@ object Main extends LazyLogging {
                     .setLevel(config.loggingLevel)
 
                 val eventLoopGroup = new NioEventLoopGroup(config.workerThreads)
-                val dnsNameResolverBuilder = new DnsNameResolverBuilder(eventLoopGroup.next())
-                    .nameServerAddresses(if (config.dnsServers.isEmpty) {
-                        DnsServerAddresses.defaultAddresses()
-                    } else {
-                        DnsServerAddresses.shuffled(config.dnsServers.map(addr =>
-                            addr.split(':') match {
-                                case Array(host, port) => new InetSocketAddress(host, port.toInt)
-                                case Array(host) => new InetSocketAddress(host, DNS_PORT)
-                            }
-                        ).asJava)
-                    })
-                    .channelType(classOf[NioDatagramChannel])
-                    .decodeIdn(config.decodeUnicode)
-                    .queryTimeoutMillis(config.queryTimeout)
-                    .recursionDesired(config.recurseQuery)
-                    .optResourceEnabled(false)
-                    .traceEnabled(true)
 
                 val dnsNameResolverPool = new GenericObjectPool[DnsNameResolver](
                     new BasePooledObjectFactory[DnsNameResolver]() {
-                        override def create(): DnsNameResolver = dnsNameResolverBuilder.build()
+                        override def create(): DnsNameResolver = {
+                            new DnsNameResolverBuilder(eventLoopGroup.next())
+                                .nameServerAddresses(if (config.dnsServers.isEmpty) {
+                                    DnsServerAddresses.defaultAddresses()
+                                } else {
+                                    DnsServerAddresses.shuffled(config.dnsServers.map(addr =>
+                                        addr.split(':') match {
+                                            case Array(host, port) => new InetSocketAddress(host, port.toInt)
+                                            case Array(host) => new InetSocketAddress(host, DNS_PORT)
+                                        }
+                                    ).asJava)
+                                })
+                                .channelType(classOf[NioDatagramChannel])
+                                .decodeIdn(config.decodeUnicode)
+                                .queryTimeoutMillis(config.queryTimeout)
+                                .recursionDesired(config.recurseQuery)
+                                .optResourceEnabled(false)
+                                .traceEnabled(true).build()
+                        }
 
                         override def wrap(resolver: DnsNameResolver): PooledObject[DnsNameResolver] = {
                             new DefaultPooledObject[DnsNameResolver](resolver)
