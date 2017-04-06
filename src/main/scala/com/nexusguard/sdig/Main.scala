@@ -15,12 +15,13 @@ import io.netty.channel.nio.NioEventLoopGroup
 import io.netty.channel.socket.nio.NioDatagramChannel
 import io.netty.handler.codec.dns.DnsRecordType._
 import io.netty.handler.codec.dns._
-import io.netty.resolver.dns.{DnsNameResolverBuilder, DnsServerAddresses}
+import io.netty.resolver.dns.{DnsNameResolver, DnsNameResolverBuilder, DnsServerAddresses}
 import io.netty.util.concurrent.Future
 import org.slf4j.{Logger, LoggerFactory}
 
 import scala.io.Source
 import scala.collection.JavaConverters._
+import scala.collection.mutable.ListBuffer
 
 case class Config(loggingLevel: Level = Level.WARN,
                   inputFiles: Seq[File] = Seq(),
@@ -28,7 +29,7 @@ case class Config(loggingLevel: Level = Level.WARN,
                   dnsServers: Seq[String] = Seq(),
                   workerThreads: Int = Runtime.getRuntime.availableProcessors(),
                   decodeUnicode: Boolean = false,
-                  queryTimeout: Int = 5000,
+                  queryTimeout: Long = Duration.ofSeconds(5).toMillis,
                   queryType: DnsRecordType = A,
                   recurseQuery: Boolean = true)
 
@@ -61,7 +62,7 @@ object Main extends LazyLogging {
                 .action( (x, c) => c.copy(decodeUnicode = x) )
                 .text("names should be decoded to unicode when received.")
 
-            opt[Int]("query-timeout")
+            opt[Long]("query-timeout")
                 .valueName("<ms>")
                 .action((x, c) => c.copy(queryTimeout = x))
                 .text("the timeout of each DNS query performed by this resolver (in milliseconds).")
@@ -115,24 +116,26 @@ object Main extends LazyLogging {
                     .setLevel(config.loggingLevel)
 
                 val eventLoopGroup = new NioEventLoopGroup(config.workerThreads)
-                val resolver = new DnsNameResolverBuilder(eventLoopGroup.next())
-                    .nameServerAddresses(if (config.dnsServers.isEmpty) {
-                        DnsServerAddresses.defaultAddresses()
-                    } else {
-                        DnsServerAddresses.shuffled(config.dnsServers.map(addr =>
-                            addr.split(':') match {
-                                case Array(host, port) => new InetSocketAddress(host, port.toInt)
-                                case Array(host) => new InetSocketAddress(host, DNS_PORT)
-                            }
-                        ).asJava)
-                    })
-                    .channelType(classOf[NioDatagramChannel])
-                    .decodeIdn(config.decodeUnicode)
-                    .queryTimeoutMillis(config.queryTimeout)
-                    .recursionDesired(config.recurseQuery)
-                    .optResourceEnabled(true)
-                    .traceEnabled(true)
-                    .build()
+
+                def createDnsNameResolver(): DnsNameResolver =
+                    new DnsNameResolverBuilder(eventLoopGroup.next())
+                        .nameServerAddresses(if (config.dnsServers.isEmpty) {
+                            DnsServerAddresses.defaultAddresses()
+                        } else {
+                            DnsServerAddresses.shuffled(config.dnsServers.map(addr =>
+                                addr.split(':') match {
+                                    case Array(host, port) => new InetSocketAddress(host, port.toInt)
+                                    case Array(host) => new InetSocketAddress(host, DNS_PORT)
+                                }
+                            ).asJava)
+                        })
+                        .channelType(classOf[NioDatagramChannel])
+                        .decodeIdn(config.decodeUnicode)
+                        .queryTimeoutMillis(config.queryTimeout)
+                        .recursionDesired(config.recurseQuery)
+                        .optResourceEnabled(false)
+                        .traceEnabled(true)
+                        .build()
 
                 val domains = config.queryDomains ++
                               config.inputFiles.flatMap(filename => Source.fromFile(filename).getLines())
@@ -158,6 +161,8 @@ object Main extends LazyLogging {
                 try {
                     val finished = new CountDownLatch(questions.size)
 
+                    logger.info(s"sending ${finished.getCount} questions")
+
                     questions.foreach(question => {
                         val ts = Instant.now()
 
@@ -166,14 +171,16 @@ object Main extends LazyLogging {
 
                         logger.debug(s"sending DNS query: ${question.name}\t$queryClass\t$queryType")
 
-                        resolver.query(question).addListener((f: Future[AddressedEnvelope[DnsResponse, InetSocketAddress]]) => {
-                            try {
-                                if (f.isSuccess) {
-                                    val answer = f.get()
+                        val resolver = createDnsNameResolver()
 
-                                    printResponse(answer.content(), answer.sender(), ts)
+                        resolver.query(question).addListener((future: Future[AddressedEnvelope[DnsResponse, InetSocketAddress]]) => {
+                            try {
+                                if (future.isSuccess) {
+                                    val answer = future.get()
+
+                                    println(dumpResponse(answer.content(), answer.sender(), ts))
                                 } else {
-                                    logger.warn(s"received error, ${f.cause()}")
+                                    logger.warn(s"received error, ${future.cause()}")
                                 }
                             } finally {
                                 finished.countDown()
@@ -191,10 +198,12 @@ object Main extends LazyLogging {
         }
     }
 
-    def printResponse(response: DnsResponse, server: InetSocketAddress, ts: Instant): Unit = {
+    def dumpResponse(response: DnsResponse, server: InetSocketAddress, ts: Instant): String = {
         logger.debug(s"received DNS answer from $server")
 
-        println(s";; ->>HEADER<<- opcode: ${response.opCode}, status: ${response.code}, id: ${response.id}")
+        val lines = new ListBuffer[String]()
+
+        lines ++= Seq("", s";; ->>HEADER<<- opcode: ${response.opCode}, status: ${response.code}, id: ${response.id}")
 
         val flags = List(
             if (response.count(DnsSection.QUESTION) > 0) Some("qr") else None,
@@ -212,26 +221,22 @@ object Main extends LazyLogging {
         val authorities = getRecords(DnsSection.AUTHORITY)
         val additionals = getRecords(DnsSection.ADDITIONAL)
 
-        println(s";; flags: $flags; QUERY: ${questions.size}, ANSWSER: ${answers.size}, " +
-                s"AUTHORITY: ${authorities.size}, ADDITIONAL: ${additionals.size}")
+        lines += s";; flags: $flags; QUERY: ${questions.size}, ANSWSER: ${answers.size}, " +
+                 s"AUTHORITY: ${authorities.size}, ADDITIONAL: ${additionals.size}"
 
         if (questions.nonEmpty) {
-            println("")
-            println(";; QUESTION SECTION:")
-
-            for (record <- questions) {
+            lines ++= Seq("", ";; QUESTION SECTION:")
+            lines ++= questions.map(record => {
                 val name = record.name()
                 val dnsClass = toString(record.dnsClass)
 
-                println(s";; $name\t$dnsClass\t${record.`type`.name}")
-            }
+                s";; $name\t$dnsClass\t${record.`type`.name}"
+            })
         }
 
         if (answers.nonEmpty) {
-            println("")
-            println(";; ANSWER SECTION:")
-
-            for (record <- answers) {
+            lines ++= Seq("", ";; ANSWER SECTION:")
+            lines ++= answers.map(record => {
                 val name = record.name()
                 val ttl = record.timeToLive()
                 val dnsClass = toString(record.dnsClass)
@@ -244,36 +249,41 @@ object Main extends LazyLogging {
                         raw.content().getBytes(idx, buf)
                         val ip = InetAddress.getByAddress(buf).getHostAddress
 
-                        println(s"$name\t\t$ttl\t$dnsClass\t$tp\t$ip")
+                        f"$name%-32s\t$ttl\t$dnsClass\t$tp\t$ip"
+
+                    case raw: DnsRawRecord if record.`type`() == CNAME =>
+                        val cname = DefaultDnsRecordDecoder.decodeName(raw.content())
+
+                        f"$name%-32s\t$ttl\t$dnsClass\t$tp\t$cname"
 
                     case ptr: DnsPtrRecord =>
                         val hostname = ptr.hostname
 
-                        println(s"$hostname\t\t$ttl\t$dnsClass\t$tp\t$name")
+                        f"$name%-32s\t$ttl\t$dnsClass\t$tp\t$hostname"
 
                     case _ =>
-                        println(s"$name\t\t$ttl\t$dnsClass\t$tp")
+                        f"$name%-32s\t$ttl\t$dnsClass\t$tp"
                 }
-            }
+            })
         }
 
         if (authorities.nonEmpty) {
-            println("")
-            println(";; AUTHORITY SECTION:")
+            lines ++= Seq("", ";; AUTHORITY SECTION:")
         }
 
         if (additionals.nonEmpty) {
-            println("")
-            println(";; ADDITIONAL SECTION:")
+            lines ++= Seq("", ";; ADDITIONAL SECTION:")
         }
 
         val now = Instant.now()
         val elapsed = Duration.between(ts, now).toMillis
         val when = ZonedDateTime.ofInstant(now, ZoneId.systemDefault()).format(DateTimeFormatter.RFC_1123_DATE_TIME)
 
-        println("")
-        println(s";; Query time: $elapsed msec")
-        println(s";; SERVER: ${server.getAddress}#${server.getPort}")
-        println(s";; WHEN: $when")
+        lines ++= Seq("",
+                      s";; Query time: $elapsed msec",
+                      s";; SERVER: ${server.getAddress.getHostAddress}#${server.getPort}",
+                      s";; WHEN: $when")
+
+        Joiner.on('\n').join(lines.toIterator.asJava)
     }
 }
