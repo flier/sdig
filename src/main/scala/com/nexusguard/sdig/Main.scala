@@ -34,13 +34,54 @@ case class Config(loggingLevel: Level = Level.WARN,
                   queryTimeout: Long = Duration.ofSeconds(5).toMillis,
                   queryType: DnsRecordType = A,
                   recurseQuery: Boolean = true)
+{
+    LoggerFactory.getLogger(Logger.ROOT_LOGGER_NAME)
+        .asInstanceOf[ch.qos.logback.classic.Logger]
+        .setLevel(loggingLevel)
 
-object Main extends LazyLogging {
+    val eventLoopGroup: NioEventLoopGroup = new NioEventLoopGroup(workerThreads)
+
+    val dnsServerAddrs: DnsServerAddresses = if (dnsServers.isEmpty) {
+        DnsServerAddresses.defaultAddresses()
+    } else {
+        DnsServerAddresses.shuffled(dnsServers.map(addr =>
+            addr.split(':') match {
+                case Array(host, port) => new InetSocketAddress(host, port.toInt)
+                case Array(host) => new InetSocketAddress(host, Config.DEFAULT_DNS_PORT)
+            }
+        ).asJava)
+    }
+
+    val dnsNameResolverPool: GenericObjectPool[DnsNameResolver] =
+        new GenericObjectPool[DnsNameResolver](
+            new BasePooledObjectFactory[DnsNameResolver]() {
+                override def create(): DnsNameResolver = {
+                    new DnsNameResolverBuilder(eventLoopGroup.next())
+                        .nameServerAddresses(dnsServerAddrs)
+                        .channelType(classOf[NioDatagramChannel])
+                        .decodeIdn(decodeUnicode)
+                        .queryTimeoutMillis(queryTimeout)
+                        .recursionDesired(recurseQuery)
+                        .optResourceEnabled(false)
+                        .traceEnabled(true)
+                        .build()
+                }
+
+                override def wrap(resolver: DnsNameResolver): PooledObject[DnsNameResolver] = {
+                    new DefaultPooledObject[DnsNameResolver](resolver)
+                }
+            })
+
+    val domains: Seq[String] = queryDomains ++ inputFiles.flatMap(Source.fromFile(_).getLines())
+}
+
+object Config {
     val APP_NAME = "sdig"
     val APP_VERSION = "1.0.0"
-    val DNS_PORT = 53
 
-    def parse_cmdline(args: Seq[String]): Option[Config] = {
+    val DEFAULT_DNS_PORT = 53
+
+    def parse(args: Seq[String]): Option[Config] = {
         val parser = new scopt.OptionParser[Config](APP_NAME) {
             head(APP_NAME, APP_VERSION)
 
@@ -97,8 +138,10 @@ object Main extends LazyLogging {
 
         parser.parse(args, Config())
     }
+}
 
-    def toString(clazz: Int): String = {
+object Main extends LazyLogging {
+    def dnsClassName(clazz: Int): String = {
         clazz & 0xFFFF match {
             case DnsRecord.CLASS_IN => "IN"
             case DnsRecord.CLASS_CSNET => "CSNET"
@@ -111,45 +154,9 @@ object Main extends LazyLogging {
     }
 
     def main(args: Array[String]): Unit = {
-        parse_cmdline(args) match {
+        Config.parse(args) match {
             case Some(config) =>
-                LoggerFactory.getLogger(Logger.ROOT_LOGGER_NAME)
-                    .asInstanceOf[ch.qos.logback.classic.Logger]
-                    .setLevel(config.loggingLevel)
-
-                val eventLoopGroup = new NioEventLoopGroup(config.workerThreads)
-
-                val dnsNameResolverPool = new GenericObjectPool[DnsNameResolver](
-                    new BasePooledObjectFactory[DnsNameResolver]() {
-                        override def create(): DnsNameResolver = {
-                            new DnsNameResolverBuilder(eventLoopGroup.next())
-                                .nameServerAddresses(if (config.dnsServers.isEmpty) {
-                                    DnsServerAddresses.defaultAddresses()
-                                } else {
-                                    DnsServerAddresses.shuffled(config.dnsServers.map(addr =>
-                                        addr.split(':') match {
-                                            case Array(host, port) => new InetSocketAddress(host, port.toInt)
-                                            case Array(host) => new InetSocketAddress(host, DNS_PORT)
-                                        }
-                                    ).asJava)
-                                })
-                                .channelType(classOf[NioDatagramChannel])
-                                .decodeIdn(config.decodeUnicode)
-                                .queryTimeoutMillis(config.queryTimeout)
-                                .recursionDesired(config.recurseQuery)
-                                .optResourceEnabled(false)
-                                .traceEnabled(true).build()
-                        }
-
-                        override def wrap(resolver: DnsNameResolver): PooledObject[DnsNameResolver] = {
-                            new DefaultPooledObject[DnsNameResolver](resolver)
-                        }
-                    })
-
-                val domains = config.queryDomains ++
-                              config.inputFiles.flatMap(filename => Source.fromFile(filename).getLines())
-
-                val questions = domains
+                val questions = config.domains
                     .map(domain =>
                         CharMatcher.whitespace().trimTrailingFrom(
                             CharMatcher.whitespace().trimLeadingFrom(domain)))
@@ -175,12 +182,12 @@ object Main extends LazyLogging {
                     questions.foreach(question => {
                         val ts = Instant.now()
 
-                        val queryClass = toString(question.dnsClass)
+                        val queryClass = dnsClassName(question.dnsClass)
                         val queryType = question.`type`().name()
 
                         logger.debug(s"sending DNS query: ${question.name}\t$queryClass\t$queryType")
 
-                        val resolver = dnsNameResolverPool.borrowObject()
+                        val resolver = config.dnsNameResolverPool.borrowObject()
 
                         resolver.query(question).addListener((future: Future[AddressedEnvelope[DnsResponse, InetSocketAddress]]) => {
                             try {
@@ -192,7 +199,7 @@ object Main extends LazyLogging {
                                     logger.warn(s"received error, ${future.cause()}")
                                 }
                             } finally {
-                                dnsNameResolverPool.returnObject(resolver)
+                                config.dnsNameResolverPool.returnObject(resolver)
 
                                 finished.countDown()
                             }
@@ -201,7 +208,7 @@ object Main extends LazyLogging {
 
                     finished.await()
                 } finally {
-                    eventLoopGroup.shutdownGracefully()
+                    config.eventLoopGroup.shutdownGracefully()
                 }
 
 
@@ -239,7 +246,7 @@ object Main extends LazyLogging {
             lines ++= Seq("", ";; QUESTION SECTION:")
             lines ++= questions.map(record => {
                 val name = record.name()
-                val dnsClass = toString(record.dnsClass)
+                val dnsClass = dnsClassName(record.dnsClass)
 
                 s";; $name\t$dnsClass\t${record.`type`.name}"
             })
@@ -250,7 +257,7 @@ object Main extends LazyLogging {
             lines ++= answers.map(record => {
                 val name = record.name()
                 val ttl = record.timeToLive()
-                val dnsClass = toString(record.dnsClass)
+                val dnsClass = dnsClassName(record.dnsClass)
                 val tp = record.`type`().name()
 
                 record match {
