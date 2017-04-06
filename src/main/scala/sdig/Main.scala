@@ -169,6 +169,11 @@ object Main extends LazyLogging {
 
                         f"$name%-32s\t$ttl\t$dnsClass\t$tp\t${ns.hostname}"
 
+                    case raw: DnsRawRecord if record.`type`() == TXT =>
+                        val txt: DnsTxtRecord = raw
+
+                        f"$name%-32s\t$ttl\t$dnsClass\t$tp\t${txt.data}"
+
                     case ptr: DnsPtrRecord =>
                         f"$name%-32s\t$ttl\t$dnsClass\t$tp\t${ptr.hostname}"
 

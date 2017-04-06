@@ -2,6 +2,7 @@ package sdig
 
 import java.net.{Inet4Address, Inet6Address, InetAddress}
 
+import com.google.common.base.Charsets
 import io.netty.handler.codec.dns.{DefaultDnsRecordDecoder, DnsRawRecord, DnsRecord, DnsRecordType}
 import io.netty.util.internal.ObjectUtil.checkNotNull
 import com.google.common.base.Preconditions.checkArgument
@@ -83,6 +84,16 @@ trait DnsSoaRecord extends DnsRecord {
      * The unsigned 32 bit minimum TTL field that should be exported with any RR from this zone.
      */
     val minimumTTL: Long
+}
+
+trait DnsTxtRecord extends DnsRecord {
+    /*
+     * One or more <character-string>s.
+     *
+     * TXT RRs are used to hold descriptive text.
+     * The semantics of the text depends on the domain where it is found.
+     */
+    val data: String
 }
 
 case class DefaultDnsARecord(name: String,
@@ -218,6 +229,24 @@ object DefaultDnsSoaRecord {
     }
 }
 
+case class DefaultDnsTxtRecord(name: String,
+                               dnsClass: Int,
+                               timeToLive: Long,
+                               data: String) extends DnsTxtRecord {
+    override def `type`(): DnsRecordType = DnsRecordType.TXT
+}
+
+object DefaultDnsTxtRecord {
+    def parse(raw: DnsRawRecord): DnsTxtRecord = {
+        checkNotNull(raw, "raw")
+        checkArgument(raw.`type`() == DnsRecordType.TXT)
+
+        val data = raw.content().toString(Charsets.UTF_8)
+
+        DefaultDnsTxtRecord(raw.name(), raw.dnsClass(), raw.timeToLive(), data)
+    }
+}
+
 object implicitConversions {
     implicit def parseDnsARecord(raw: DnsRawRecord): DnsARecord = DefaultDnsARecord.parse(raw)
 
@@ -230,4 +259,6 @@ object implicitConversions {
     implicit def parseDnsNsRecord(raw: DnsRawRecord): DnsNsRecord = DefaultDnsNsRecord.parse(raw)
 
     implicit def parseDnsSoaRecord(raw: DnsRawRecord): DnsSoaRecord = DefaultDnsSoaRecord.parse(raw)
+
+    implicit def parseDnsTxtRecord(raw: DnsRawRecord): DnsTxtRecord = DefaultDnsTxtRecord.parse(raw)
 }
