@@ -1,6 +1,6 @@
 package sdig
 
-import java.net.{Inet4Address, Inet6Address, InetAddress, InetSocketAddress}
+import java.net.{Inet4Address, Inet6Address, InetSocketAddress}
 import java.time._
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.CountDownLatch
@@ -12,14 +12,14 @@ import io.netty.channel.AddressedEnvelope
 import io.netty.handler.codec.dns.DnsRecordType._
 import io.netty.handler.codec.dns._
 import io.netty.util.concurrent.Future
+import nl.grons.metrics.scala.DefaultInstrumented
 import org.slf4j.{Logger, LoggerFactory}
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable.ListBuffer
-
 import sdig.implicitConversions._
 
-object Main extends LazyLogging {
+object Main extends DefaultInstrumented with LazyLogging {
     def dnsClassName(clazz: Int): String = {
         clazz & 0xFFFF match {
             case DnsRecord.CLASS_IN => "IN"
@@ -62,6 +62,11 @@ object Main extends LazyLogging {
 
                     logger.info(s"sending ${finished.getCount} questions")
 
+                    val responseTime = metrics.timer("response")
+                    val sentQueries = metrics.meter("sent-queries", "resolve")
+                    val receivedAnswers = metrics.meter("received-answers", "resolve")
+                    val receivedErrors = metrics.meter("received-errors", "resolve")
+
                     questions.foreach(question => {
                         val ts = Instant.now()
 
@@ -72,13 +77,21 @@ object Main extends LazyLogging {
 
                         val resolver = config.dnsNameResolverPool.borrowObject()
 
+                        val ctxt = responseTime.timerContext()
+
                         resolver.query(question).addListener((future: Future[AddressedEnvelope[DnsResponse, InetSocketAddress]]) => {
+                            ctxt.stop()
+
                             try {
                                 if (future.isSuccess) {
+                                    receivedAnswers.mark()
+
                                     val answer = future.get()
 
                                     println(dumpResponse(answer.content(), answer.sender(), ts))
                                 } else {
+                                    receivedErrors.mark()
+
                                     logger.warn(s"received error, ${future.cause()}")
                                 }
                             } finally {
@@ -87,9 +100,27 @@ object Main extends LazyLogging {
                                 finished.countDown()
                             }
                         })
+
+                        sentQueries.mark()
                     })
 
                     finished.await()
+
+                    logger.info(s"sent ${sentQueries.count} queries with ${responseTime.count} responses, " +
+                        f"${receivedAnswers.count} answers (${receivedAnswers.count * 100.0 / sentQueries.count}%.2f%%), " +
+                        f"${receivedErrors.count} errors (${receivedErrors.count * 100.0 / sentQueries.count}%.2f%%)")
+                    logger.info(f"sent in ${sentQueries.meanRate}%.2f/s (" +
+                        f"${sentQueries.oneMinuteRate}%.2f/s in 1m, " +
+                        f"${sentQueries.fiveMinuteRate}%.2f/s in 5m, " +
+                        f"${sentQueries.fifteenMinuteRate}%.2f/s in 15m)")
+                    logger.info(f"received in ${responseTime.meanRate}%.2f/s (" +
+                        f"${responseTime.oneMinuteRate}%.2f/s in 1m, " +
+                        f"${responseTime.fiveMinuteRate}%.2f/s in 5m, " +
+                        f"${responseTime.fifteenMinuteRate}%.2f/s in 15m)")
+                    logger.info(f"response time in ${Duration.ofNanos(responseTime.mean.toLong).toMillis} ms (mean), " +
+                        f"${Duration.ofNanos(responseTime.min).toMillis} ms (min), " +
+                        f"${Duration.ofNanos(responseTime.max).toMillis} ms (max), " +
+                        f"${Duration.ofNanos(responseTime.stdDev.toLong).toMillis} ms (std dev), ")
                 } finally {
                     config.eventLoopGroup.shutdownGracefully()
                 }
