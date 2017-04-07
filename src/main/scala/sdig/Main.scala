@@ -66,47 +66,55 @@ object Main extends DefaultInstrumented with LazyLogging {
                     val sentQueries = metrics.meter("sent-queries", "resolve")
                     val receivedAnswers = metrics.meter("received-answers", "resolve")
                     val receivedErrors = metrics.meter("received-errors", "resolve")
+                    val retryTimes = metrics.meter("retry-times", "resolve")
 
                     val startTime = Instant.now()
 
                     questions.foreach(question => {
-                        val ts = Instant.now()
-
-                        val queryClass = dnsClassName(question.dnsClass)
-                        val queryType = question.`type`().name()
-
-                        logger.debug(s"sending DNS query: ${question.name}\t$queryClass\t$queryType")
-
                         for (_ <- 0 until config.benchmarkIterations) {
-                            val resolver = config.dnsNameResolverPool.borrowObject()
+                            def query(retryTime: Int): Unit = {
+                                val resolver = config.dnsNameResolverPool.borrowObject()
+                                val ts = Instant.now()
+                                val ctxt = responseTime.timerContext()
 
-                            val ctxt = responseTime.timerContext()
+                                logger.debug(s"sending DNS query: ${question.name}\t${dnsClassName(question.dnsClass)}\t${question.`type`().name()}")
 
-                            resolver.query(question).addListener((future: Future[AddressedEnvelope[DnsResponse, InetSocketAddress]]) => {
-                                ctxt.stop()
+                                resolver.query(question).addListener((future: Future[AddressedEnvelope[DnsResponse, InetSocketAddress]]) => {
+                                    val elapsed = Duration.ofNanos(ctxt.stop())
 
-                                try {
-                                    if (future.isSuccess) {
-                                        receivedAnswers.mark()
+                                    try {
+                                        if (future.isSuccess) {
+                                            receivedAnswers.mark()
 
-                                        val answer = future.get()
+                                            val answer = future.get()
 
-                                        if (!config.benchMode) {
-                                            println(dumpResponse(answer.content(), answer.sender(), ts))
+                                            if (!config.benchMode) {
+                                                println(dumpResponse(answer.content(), answer.sender(), elapsed))
+                                            }
+
+                                            answer.release()
+
+                                            finished.countDown()
+                                        } else {
+                                            receivedErrors.mark()
+
+                                            logger.warn(s"received error, ${future.cause()}")
+
+                                            if (retryTime > 0) {
+                                                retryTimes.mark()
+
+                                                query(retryTime - 1)
+                                            } else {
+                                                finished.countDown()
+                                            }
                                         }
-
-                                        answer.release()
-                                    } else {
-                                        receivedErrors.mark()
-
-                                        logger.warn(s"received error, ${future.cause()}")
+                                    } finally {
+                                        config.dnsNameResolverPool.returnObject(resolver)
                                     }
-                                } finally {
-                                    config.dnsNameResolverPool.returnObject(resolver)
+                                })
+                            }
 
-                                    finished.countDown()
-                                }
-                            })
+                            query(config.maxRetryTimes)
 
                             sentQueries.mark()
                         }
@@ -116,9 +124,10 @@ object Main extends DefaultInstrumented with LazyLogging {
 
                     val elapsed = Duration.between(startTime, Instant.now()).toMillis
 
-                    logger.info(s"sent ${sentQueries.count} queries in $elapsed ms with ${responseTime.count} responses, " +
+                    logger.info(f"sent ${sentQueries.count} queries in ${elapsed /1000.0}%.2f s with ${responseTime.count} responses, including " +
                         f"${receivedAnswers.count} answers (${receivedAnswers.count * 100.0 / sentQueries.count}%.2f%%), " +
-                        f"${receivedErrors.count} errors (${receivedErrors.count * 100.0 / sentQueries.count}%.2f%%)")
+                        f"${receivedErrors.count} errors (${receivedErrors.count * 100.0 / sentQueries.count}%.2f%%), " +
+                        s"retry ${retryTimes.count} times")
                     logger.info(f"sent in ${sentQueries.meanRate}%.2f/s (" +
                         f"${sentQueries.oneMinuteRate}%.2f/s in 1m, " +
                         f"${sentQueries.fiveMinuteRate}%.2f/s in 5m, " +
@@ -140,7 +149,7 @@ object Main extends DefaultInstrumented with LazyLogging {
         }
     }
 
-    def dumpResponse(response: DnsResponse, server: InetSocketAddress, ts: Instant): String = {
+    def dumpResponse(response: DnsResponse, server: InetSocketAddress, elapsed: Duration): String = {
         logger.debug(s"received DNS answer from $server")
 
         val lines = new ListBuffer[String]()
@@ -255,14 +264,10 @@ object Main extends DefaultInstrumented with LazyLogging {
             lines ++= Seq("", ";; ADDITIONAL SECTION:")
         }
 
-        val now = Instant.now()
-        val elapsed = Duration.between(ts, now).toMillis
-        val when = ZonedDateTime.ofInstant(now, ZoneId.systemDefault()).format(DateTimeFormatter.RFC_1123_DATE_TIME)
-
         lines ++= Seq("",
-                      s";; Query time: $elapsed msec",
+                      s";; Query time: ${elapsed.toMillis} msec",
                       s";; SERVER: ${server.getAddress.getHostAddress}#${server.getPort}",
-                      s";; WHEN: $when")
+                      s";; WHEN: ${ZonedDateTime.now().format(DateTimeFormatter.RFC_1123_DATE_TIME)}")
 
         Joiner.on('\n').join(lines.toIterator.asJava)
     }

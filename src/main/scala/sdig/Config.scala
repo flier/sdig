@@ -31,6 +31,7 @@ case class Config(loggingLevel: Level = Level.WARN,
                   readLimit: Long = 0,
                   checkInterval: Long = AbstractTrafficShapingHandler.DEFAULT_CHECK_INTERVAL,
                   maxWaitTime: Long = AbstractTrafficShapingHandler.DEFAULT_MAX_TIME,
+                  maxRetryTimes: Int = 3,
                   decodeUnicode: Boolean = false,
                   queryTimeout: Long = Duration.ofSeconds(5).toMillis,
                   queryType: DnsRecordType = A,
@@ -149,6 +150,11 @@ object Config extends LazyLogging {
                 .valueName("<bytes>")
                 .action((x, c) => c.copy(writeLimit = x))
                 .text("set 0 or a limit in bytes/s")
+
+            opt[Int]("max-retry-times")
+                .valueName("<num>")
+                .action((x, c) => c.copy(maxRetryTimes = x))
+                .text("maximum rety time when query timeout")
 
             opt[Boolean]("decode-unicode")
                 .action( (x, c) => c.copy(decodeUnicode = x) )
