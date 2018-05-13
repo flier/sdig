@@ -47,7 +47,8 @@ object Main extends DefaultInstrumented with LazyLogging {
                         if (config.queryType == PTR && !domain.endsWith(".arpa")) {
                             val addr = InetAddresses.forString(domain)
 
-                            Joiner.on('.').join(addr.getAddress.reverse.map("%x".format(_)).toIterator.asJava) +
+                            //Joiner.on('.').join(addr.getAddress.reverse.map("%x".format(_)).toIterator.asJava) +
+                            domain.split("\\.").reverse.map(_.toInt).mkString(".") +
                             (addr match {
                                 case _: Inet4Address => ".in-addr.arpa"
                                 case _: Inet6Address => ".ip6.arpa"
